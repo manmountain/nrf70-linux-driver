@@ -2,12 +2,18 @@
 KROOT ?= /lib/modules/`uname -r`/build
 MODE?= STA
 LOW_POWER?= 0
+BOARD ?= RPI5
 MACHINE := $(shell uname -m)
-RPI_DTS = dts/nrf70_rpi_interposer.dts
+
+ifeq ($(BOARD), RPI5)
+RPI_DTS = dts/nrf70_rpi5_interposer.dts
+else
+$(error Invalid BOARD=$(BOARD) specified. Valid values are RPI5)
+endif
 
 # Private portion
 # Check if the machine is a Raspberry Pi, doesn't cover cross-compilation and other cases
-IS_RPI := $(shell [ "$(MACHINE)" = "armv7l" ] && \
+IS_RPI := $(shell ([ "$(MACHINE)" = "armv7l" ] || [ "$(MACHINE)" = "aarch64" ] || [ "$(MACHINE)" = "arm64" ]) && \
 				   grep -q "Raspberry Pi" /proc/device-tree/model && \
 				   echo 1 || echo 0)
 
@@ -37,6 +43,7 @@ LINUX_SHIM_INC_DIR = $(shell cd $(PWD); pwd)
 LINUX_SHIM_DIR = .
 
 # Common Includes
+ccflags-y += -DMODULE
 ccflags-y += -I$(LINUX_SHIM_INC_DIR)/inc
 ccflags-y += -I$(LINUX_SHIM_INC_DIR)/src/spi/inc
 ccflags-y += -I$(ROOT_INC_DIR)/utils/inc
@@ -180,6 +187,9 @@ ccflags-y += -DCONFIG_NRF700X_SYSTEM_MODE
 endif
 
 ccflags-y += -Werror
+ccflags-y += -Wno-missing-prototypes
+ccflags-y += -Wno-missing-declarations
+ccflags-y += -Wno-enum-conversion
 
 NAME = nrf$(DRV_FUNC_NAME)$(DRV_MODE_NAME)
 
@@ -189,7 +199,16 @@ $(NAME)-objs= $(OBJS)
 
 # Cross-compiler variables
 CROSS_COMPILE ?=
-ARCH ?= $(shell uname -m)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),aarch64)
+ARCH ?= arm64
+else ifeq ($(UNAME_M),armv7l)
+ARCH ?= arm
+else ifeq ($(UNAME_M),x86_64)
+ARCH ?= x86_64
+else
+ARCH ?= $(UNAME_M)
+endif
 
 all: $(if $(filter-out 0,$(IS_RPI)),dt) gen_patch_bin
 	@make -C $(KROOT) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
@@ -199,7 +218,8 @@ dt:
 
 gen_patch_bin:
 	cd $(shell dirname ${FW_PATCH_BIN}); \
-	ld -r -b binary -o fw_patch_bin.o_shipped nrf70.bin; \
+	ld -r -b binary -o fw_patch_bin.o nrf70.bin; \
+	cp -f fw_patch_bin.o fw_patch_bin.o_shipped; \
 	touch .fw_patch_bin.o.cmd
 
 clean:

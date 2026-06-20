@@ -739,6 +739,14 @@ void nrf_wifi_set_if_callbk_fn(
 	vif_ctx_lnx->status_set_if = set_if_event->return_value;
 }
 
+void nrf_wifi_reg_change_callbk_fn(
+	void *os_vif_ctx,
+	struct nrf_wifi_event_regulatory_change *reg_change,
+	unsigned int event_len)
+{
+	/* Event is marked unused by current firmware contract; consume it quietly. */
+}
+
 void nrf_wifi_twt_config_callbk_fn(
 	void *os_vif_ctx, struct nrf_wifi_umac_cmd_config_twt *twt_cfg_event,
 	unsigned int event_len)
@@ -923,6 +931,7 @@ int __init nrf_wifi_init_lnx(void)
 	callbk_fns.roc_cancel_callbk_fn =
 		&nrf_wifi_cfg80211_roc_cancel_callbk_fn;
 	callbk_fns.tx_status_callbk_fn = &nrf_wifi_cfg80211_tx_status_callbk_fn;
+	callbk_fns.reg_change_callbk_fn = &nrf_wifi_reg_change_callbk_fn;
 
 	callbk_fns.twt_config_callbk_fn = &nrf_wifi_twt_config_callbk_fn;
 	callbk_fns.twt_teardown_callbk_fn = &nrf_wifi_twt_teardown_callbk_fn;
@@ -986,7 +995,9 @@ void __exit nrf_wifi_deinit_lnx(void)
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nordic Semiconductor ASA");
 MODULE_DESCRIPTION("FullMAC Driver for nRF WLAN Solution");
+#ifdef CONFIG_SYSFS
 MODULE_VERSION(NRF_WIFI_FMAC_DRV_VER);
+#endif
 
 module_init(nrf_wifi_init_lnx);
 module_exit(nrf_wifi_deinit_lnx);

@@ -249,7 +249,12 @@ void nrf_wifi_netdev_frame_rx_callbk_fn(void *os_vif_ctx, void *frm)
 
 	skb->dev = netdev;
 	skb->protocol = eth_type_trans(skb, skb->dev);
-	skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it */
+	/*
+	 * RX frames arrive over SPI and are not accompanied by Linux-recognized
+	 * checksum offload metadata. Let the stack validate checksums in software
+	 * instead of marking them verified and risking silent payload corruption.
+	 */
+	skb->ip_summed = CHECKSUM_NONE;
 
 	netif_rx(skb);
 }
@@ -320,7 +325,7 @@ nrf_wifi_netdev_add_vif(struct nrf_wifi_ctx_lnx *rpu_ctx_lnx,
 
 	strncpy(netdev->name, if_name, sizeof(netdev->name) - 1);
 
-	ether_addr_copy(netdev->dev_addr, mac_addr);
+	eth_hw_addr_set(netdev, mac_addr);
 
 	netdev->ieee80211_ptr = wdev;
 

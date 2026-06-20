@@ -9,6 +9,7 @@
 #include "fmac_main.h"
 #include "net_stack.h"
 #include "fmac_api.h"
+#include <linux/version.h>
 
 extern const struct ieee80211_txrx_stypes ieee80211_default_mgmt_stypes[];
 extern struct ieee80211_supported_band band_2ghz;
@@ -439,7 +440,12 @@ int nrf_wifi_cfg80211_start_ap(struct wiphy *wiphy, struct net_device *netdev,
 	}
 
 	start_ap_info->hidden_ssid = params->hidden_ssid;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	start_ap_info->smps_mode = params->smps_mode;
+#else
+	start_ap_info->smps_mode = 0;
+#endif
 	start_ap_info->inactivity_timeout = params->inactivity_timeout;
 
 	start_ap_info->connect_common_info.wpa_versions =
@@ -597,6 +603,16 @@ int nrf_wifi_cfg80211_add_sta(struct wiphy *wiphy, struct net_device *netdev,
 
 	add_sta_info->nrf_wifi_listen_interval = params->listen_interval;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	if (params->link_sta_params.supported_rates_len > 0) {
+		memcpy(add_sta_info->supp_rates.rates,
+		       params->link_sta_params.supported_rates,
+		       params->link_sta_params.supported_rates_len);
+
+		add_sta_info->supp_rates.nrf_wifi_num_rates =
+			params->link_sta_params.supported_rates_len;
+	}
+#else
 	if (params->supported_rates_len > 0) {
 		memcpy(add_sta_info->supp_rates.rates, params->supported_rates,
 		       params->supported_rates_len);
@@ -604,6 +620,7 @@ int nrf_wifi_cfg80211_add_sta(struct wiphy *wiphy, struct net_device *netdev,
 		add_sta_info->supp_rates.nrf_wifi_num_rates =
 			params->supported_rates_len;
 	}
+#endif
 
 	if (params->ext_capab_len > 0) {
 		memcpy(add_sta_info->ext_capability.ext_capability,
@@ -634,6 +651,17 @@ int nrf_wifi_cfg80211_add_sta(struct wiphy *wiphy, struct net_device *netdev,
 	flags2->mask = params->sta_flags_mask;
 	flags2->set = params->sta_flags_set;
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	if (params->link_sta_params.ht_capa)
+		memcpy(add_sta_info->ht_capability, params->link_sta_params.ht_capa,
+		       sizeof(struct ieee80211_ht_cap));
+
+	if (params->link_sta_params.vht_capa)
+		memcpy(add_sta_info->vht_capability,
+		       params->link_sta_params.vht_capa,
+		       sizeof(struct ieee80211_vht_cap));
+#else
 	if (params->ht_capa)
 		memcpy(add_sta_info->ht_capability, params->ht_capa,
 		       sizeof(struct ieee80211_ht_cap));
@@ -641,12 +669,20 @@ int nrf_wifi_cfg80211_add_sta(struct wiphy *wiphy, struct net_device *netdev,
 	if (params->vht_capa)
 		memcpy(add_sta_info->vht_capability, params->vht_capa,
 		       sizeof(struct ieee80211_vht_cap));
+#endif
 
 	ether_addr_copy(add_sta_info->mac_addr, mac);
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	if (params->link_sta_params.opmode_notif_used)
+		add_sta_info->opmode_notif =
+			(unsigned char)params->link_sta_params.opmode_notif;
+#else
 	if (params->opmode_notif_used)
 		add_sta_info->opmode_notif =
 			(unsigned char)params->opmode_notif;
+#endif
 
 	if (params->uapsd_queues)
 		add_sta_info->wme_uapsd_queues = params->uapsd_queues;
@@ -752,9 +788,15 @@ int nrf_wifi_cfg80211_chg_sta(struct wiphy *wiphy, struct net_device *netdev,
 
 	ether_addr_copy(chg_sta_info->mac_addr, mac);
 
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	if (params->link_sta_params.opmode_notif_used)
+		chg_sta_info->opmode_notif =
+			(unsigned char)params->link_sta_params.opmode_notif;
+	#else
 	if (params->opmode_notif_used)
 		chg_sta_info->opmode_notif =
 			(unsigned char)params->opmode_notif;
+	#endif
 
 	if (params->max_sp)
 		chg_sta_info->wme_max_sp = params->max_sp;
@@ -940,11 +982,11 @@ static void nrf_wifi_cfg80211_scan_results(
 
 	rx_channel = ieee80211_get_channel(wiphy, new_scan_results->frequency);
 
-	res = cfg80211_inform_bss_width(
-		wiphy, rx_channel, NL80211_BSS_CHAN_WIDTH_20, ftype,
-		new_scan_results->mac_addr, new_scan_results->ies_tsf,
-		new_scan_results->capability, new_scan_results->beacon_interval,
-		ie, ielen, signal, GFP_KERNEL);
+	res = cfg80211_inform_bss(
+		wiphy, rx_channel, ftype, new_scan_results->mac_addr,
+		new_scan_results->ies_tsf, new_scan_results->capability,
+		new_scan_results->beacon_interval, ie, ielen, signal,
+		GFP_KERNEL);
 
 	/* cfg80211_put_bss(res) ?? */
 }
@@ -982,7 +1024,6 @@ void nrf_wifi_cfg80211_rx_bcn_prb_rsp_callbk_fn(void *os_vif_ctx, void *frm,
 			      !ieee80211_is_beacon(mgmt->frame_control))) {
 		return;
 	}
-	bss_meta.scan_width = NL80211_BSS_CHAN_WIDTH_20;
 	bss_meta.signal = signal;
 	bss_meta.chan = ieee80211_get_channel(rpu_ctx_lnx->wiphy, frequency);
 	bss = cfg80211_inform_bss_frame_data(rpu_ctx_lnx->wiphy, &bss_meta,
@@ -1077,10 +1118,25 @@ int nrf_wifi_cfg80211_auth(struct wiphy *wiphy, struct net_device *netdev,
 
 	memcpy(auth_info->nrf_wifi_bssid, req->bss->bssid, ETH_ALEN);
 
+	if (!req->bss->ies || !req->bss->ies->len) {
+		pr_err("%s: missing BSS IEs\n", __func__);
+		status = -EINVAL;
+		goto out;
+	}
+
+	if (req->bss->ies->len > NRF_WIFI_MAX_IE_LEN) {
+		pr_err("%s: BSS IE len (%u) exceeds max length (%u)\n",
+		       __func__,
+		       (unsigned int)req->bss->ies->len,
+		       NRF_WIFI_MAX_IE_LEN);
+		status = -EINVAL;
+		goto out;
+	}
+
 	memcpy(auth_info->bss_ie.ie, req->bss->ies->data, req->bss->ies->len);
 
 	auth_info->bss_ie.ie_len = req->bss->ies->len;
-	auth_info->scan_width = req->bss->scan_width;
+	auth_info->scan_width = NL80211_BSS_CHAN_WIDTH_20;
 	auth_info->nrf_wifi_signal = req->bss->signal;
 	auth_info->capability = req->bss->capability;
 	auth_info->beacon_interval = req->bss->beacon_interval;
@@ -1089,6 +1145,13 @@ int nrf_wifi_cfg80211_auth(struct wiphy *wiphy, struct net_device *netdev,
 
 	ssid_ie = cfg80211_find_ie(WLAN_EID_SSID, req->bss->ies->data,
 				   req->bss->ies->len);
+
+	if (!ssid_ie || req->bss->ies->len < 2 ||
+	    (ssid_ie + 2 + ssid_ie[1]) > (req->bss->ies->data + req->bss->ies->len)) {
+		pr_err("%s: invalid SSID IE\n", __func__);
+		status = -EINVAL;
+		goto out;
+	}
 
 	auth_info->ssid.nrf_wifi_ssid_len = ssid_ie[1];
 
@@ -1104,6 +1167,15 @@ int nrf_wifi_cfg80211_auth(struct wiphy *wiphy, struct net_device *netdev,
 	memcpy(auth_info->ssid.nrf_wifi_ssid, ssid_ie + 2, ssid_ie[1]);
 
 	if (req->key_len) {
+		if (req->key_len > NRF_WIFI_MAX_KEY_LENGTH) {
+			pr_err("%s: key len (%u) exceeds max length (%u)\n",
+			       __func__,
+			       (unsigned int)req->key_len,
+			       NRF_WIFI_MAX_KEY_LENGTH);
+			status = -EINVAL;
+			goto out;
+		}
+
 		auth_info->key_info.key_idx = req->key_idx;
 
 		memcpy(auth_info->key_info.key.nrf_wifi_key, req->key,
@@ -1120,6 +1192,15 @@ int nrf_wifi_cfg80211_auth(struct wiphy *wiphy, struct net_device *netdev,
 	}
 
 	if (req->auth_data_len) {
+		if (req->auth_data_len > NRF_WIFI_MAX_SAE_DATA_LENGTH) {
+			pr_err("%s: SAE data len (%u) exceeds max length (%u)\n",
+			       __func__,
+			       (unsigned int)req->auth_data_len,
+			       NRF_WIFI_MAX_SAE_DATA_LENGTH);
+			status = -EINVAL;
+			goto out;
+		}
+
 		auth_info->sae.sae_data_len = req->auth_data_len;
 		memcpy(auth_info->sae.sae_data, req->auth_data,
 		       req->auth_data_len);
@@ -1192,8 +1273,21 @@ int nrf_wifi_cfg80211_assoc(struct wiphy *wiphy, struct net_device *netdev,
 
 	memcpy(assoc_info->nrf_wifi_bssid, req->bss->bssid, ETH_ALEN);
 
+	if (!req->bss->ies || !req->bss->ies->len) {
+		pr_err("%s: missing BSS IEs\n", __func__);
+		status = -EINVAL;
+		goto out;
+	}
+
 	ssid_ie = cfg80211_find_ie(WLAN_EID_SSID, req->bss->ies->data,
 				   req->bss->ies->len);
+
+	if (!ssid_ie || req->bss->ies->len < 2 ||
+	    (ssid_ie + 2 + ssid_ie[1]) > (req->bss->ies->data + req->bss->ies->len)) {
+		pr_err("%s: invalid SSID IE\n", __func__);
+		status = -EINVAL;
+		goto out;
+	}
 
 	assoc_info->ssid.nrf_wifi_ssid_len = ssid_ie[1];
 
@@ -1209,6 +1303,15 @@ int nrf_wifi_cfg80211_assoc(struct wiphy *wiphy, struct net_device *netdev,
 	memcpy(assoc_info->ssid.nrf_wifi_ssid, ssid_ie + 2, ssid_ie[1]);
 
 	/* WPA-IE */
+	if (req->ie_len > NRF_WIFI_MAX_IE_LEN) {
+		pr_err("%s: assoc IE len (%u) exceeds max length (%u)\n",
+		       __func__,
+		       (unsigned int)req->ie_len,
+		       NRF_WIFI_MAX_IE_LEN);
+		status = -EINVAL;
+		goto out;
+	}
+
 	assoc_info->wpa_ie.ie_len = req->ie_len;
 
 	if (req->ie_len > 0) {
@@ -1241,9 +1344,21 @@ void nrf_wifi_cfg80211_assoc_resp_callbk_fn(
 
 	vif_ctx_lnx = os_vif_ctx;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	{
+		struct cfg80211_rx_assoc_resp_data data = {
+			.buf = assoc_resp_event->frame.frame,
+			.len = assoc_resp_event->frame.frame_len,
+		};
+
+		data.links[0].bss = vif_ctx_lnx->bss;
+		cfg80211_rx_assoc_resp(vif_ctx_lnx->netdev, &data);
+	}
+#else
 	cfg80211_rx_assoc_resp(vif_ctx_lnx->netdev, vif_ctx_lnx->bss,
 			       assoc_resp_event->frame.frame,
 			       assoc_resp_event->frame.frame_len, -1, NULL, 0);
+#endif
 }
 
 int nrf_wifi_cfg80211_deauth(struct wiphy *wiphy, struct net_device *netdev,
@@ -1325,7 +1440,11 @@ int nrf_wifi_cfg80211_disassoc(struct wiphy *wiphy, struct net_device *netdev,
 
 	disassoc_info->reason_code = req->reason_code;
 
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	memcpy(disassoc_info->mac_addr, req->ap_addr, ETH_ALEN);
+	#else
 	memcpy(disassoc_info->mac_addr, req->bss->bssid, ETH_ALEN);
+	#endif
 
 	if (req->local_state_change)
 		disassoc_info->nrf_wifi_flags |=
@@ -2262,20 +2381,112 @@ out:
 	return status;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+static int nrf_wifi_cfg80211_add_key_compat(struct wiphy *wiphy,
+					     struct net_device *netdev,
+					     int link_id, u8 key_index,
+					     bool pairwise,
+					     const u8 *mac_addr,
+					     struct key_params *params)
+{
+	return nrf_wifi_cfg80211_add_key(wiphy, netdev, key_index, pairwise,
+					 mac_addr, params);
+}
+
+static int nrf_wifi_cfg80211_del_key_compat(struct wiphy *wiphy,
+					     struct net_device *netdev,
+					     int link_id, u8 key_idx,
+					     bool pairwise,
+					     const u8 *mac_addr)
+{
+	return nrf_wifi_cfg80211_del_key(wiphy, netdev, key_idx, pairwise,
+					 mac_addr);
+}
+
+static int nrf_wifi_cfg80211_set_def_key_compat(struct wiphy *wiphy,
+						 struct net_device *netdev,
+						 int link_id,
+						 u8 key_index,
+						 bool unicast,
+						 bool multicast)
+{
+	return nrf_wifi_cfg80211_set_def_key(wiphy, netdev, key_index,
+					     unicast, multicast);
+}
+
+static int nrf_wifi_cfg80211_set_def_mgmt_key_compat(struct wiphy *wiphy,
+						      struct net_device *netdev,
+						      int link_id,
+						      u8 key_index)
+{
+	return nrf_wifi_cfg80211_set_def_mgmt_key(wiphy, netdev, key_index);
+}
+
+static int nrf_wifi_cfg80211_chg_bcn_compat(struct wiphy *wiphy,
+					    struct net_device *netdev,
+					    struct cfg80211_ap_update *params)
+{
+	return nrf_wifi_cfg80211_chg_bcn(wiphy, netdev, &params->beacon);
+}
+
+static int nrf_wifi_cfg80211_stop_ap_compat(struct wiphy *wiphy,
+					    struct net_device *netdev,
+					    unsigned int link_id)
+{
+	return nrf_wifi_cfg80211_stop_ap(wiphy, netdev);
+}
+
+static int nrf_wifi_cfg80211_get_tx_power_compat(struct wiphy *wiphy,
+						 struct wireless_dev *wdev,
+						 int radio_idx,
+						 unsigned int link_id,
+						 int *dbm)
+{
+	return nrf_wifi_cfg80211_get_tx_power(wiphy, wdev, dbm);
+}
+
+static int nrf_wifi_cfg80211_get_channel_compat(struct wiphy *wiphy,
+						struct wireless_dev *wdev,
+						unsigned int link_id,
+						struct cfg80211_chan_def *chandef)
+{
+	return nrf_wifi_cfg80211_get_channel(wiphy, wdev, chandef);
+}
+
+static int nrf_wifi_cfg80211_set_wiphy_params_compat(struct wiphy *wiphy,
+						      int radio_idx,
+						      u32 changed)
+{
+	return nrf_wifi_cfg80211_set_wiphy_params(wiphy, changed);
+}
+#endif
+
 struct cfg80211_ops cfg80211_ops = {
 
 	.add_virtual_intf = nrf_wifi_cfg80211_add_vif,
 	.del_virtual_intf = nrf_wifi_cfg80211_del_vif,
 	.change_virtual_intf = nrf_wifi_cfg80211_chg_vif,
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	.add_key = nrf_wifi_cfg80211_add_key_compat,
+	.del_key = nrf_wifi_cfg80211_del_key_compat,
+	.set_default_key = nrf_wifi_cfg80211_set_def_key_compat,
+	.set_default_mgmt_key = nrf_wifi_cfg80211_set_def_mgmt_key_compat,
+#else
 	.add_key = nrf_wifi_cfg80211_add_key,
 	.del_key = nrf_wifi_cfg80211_del_key,
 	.set_default_key = nrf_wifi_cfg80211_set_def_key,
 	.set_default_mgmt_key = nrf_wifi_cfg80211_set_def_mgmt_key,
+#endif
 
 	.start_ap = nrf_wifi_cfg80211_start_ap,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	.change_beacon = nrf_wifi_cfg80211_chg_bcn_compat,
+	.stop_ap = nrf_wifi_cfg80211_stop_ap_compat,
+#else
 	.change_beacon = nrf_wifi_cfg80211_chg_bcn,
 	.stop_ap = nrf_wifi_cfg80211_stop_ap,
+#endif
 
 	.add_station = nrf_wifi_cfg80211_add_sta,
 	.del_station = nrf_wifi_cfg80211_del_sta,
@@ -2306,9 +2517,15 @@ struct cfg80211_ops cfg80211_ops = {
 	.set_qos_map = nrf_wifi_cfg80211_set_qos_map,
 
 	.get_station = nrf_wifi_cfg80211_get_station,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	.get_tx_power = nrf_wifi_cfg80211_get_tx_power_compat,
+	.get_channel = nrf_wifi_cfg80211_get_channel_compat,
+	.set_wiphy_params = nrf_wifi_cfg80211_set_wiphy_params_compat,
+#else
 	.get_tx_power = nrf_wifi_cfg80211_get_tx_power,
 	.get_channel = nrf_wifi_cfg80211_get_channel,
 	.set_wiphy_params = nrf_wifi_cfg80211_set_wiphy_params,
+#endif
 };
 #else /* CONFIG_NRF700X_RADIO_TEST */
 struct cfg80211_ops cfg80211_ops = {};

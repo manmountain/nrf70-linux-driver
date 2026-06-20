@@ -18,20 +18,20 @@ The driver supports the following features:
  - Wi-Fi RADIO-TEST mode
 
 # Getting started
-The driver can be used with any Linux based products, but it is tested on a Raspberry Pi4B running the Ubuntu 22.04 LTS operating system. Support for other Linux distributions is not part of the scope of this project.
+The driver can be used with any Linux based products, but it is tested on a Raspberry Pi 5 running Ubuntu 26.04 LTS. Support for other Linux distributions is not part of the scope of this project.
 ## Prerequisites
 
 ### Hardware
 The following hardware is required to run the driver:
- - Raspberry Pi4B
+ - Raspberry Pi 5
  - nRF7002 or nRF7001 Evaluation Kit (without Host MCU)
- - An Interposer board to connect the nRF70 series Wi-Fi SoC to the Raspberry Pi4B header.
+ - An Interposer board to connect the nRF70 series Wi-Fi SoC to the Raspberry Pi header.
     >Note: The Interposer board is not included in the nRF7002 or nRF7001 Evaluation Kit and will need to be manufactured separately. The reference board design files for the same can be found [`here`](https://github.com/NordicPlayground/nrf70-linux-driver/tree/main/boards/RPi4B_interposer).
- - A microSD card (at least 32GB) with Ubuntu 22.04 LTS installed
+ - A microSD card (at least 32GB) with Ubuntu 26.04 LTS installed
 
 ### Software
 The following software is required to run the driver:
- - Ubuntu 22.04.03 LTS (64-bit) comes with `5.15.0-1037-raspi` Linux kernel
+ - Ubuntu 26.04 LTS (64-bit) with the Raspberry Pi kernel package for your image
 
 ### Install dependencies
 The following dependencies are required to build the driver, install them using `apt`:
@@ -61,8 +61,70 @@ The following dependencies are required to build the driver, install them using 
     ```
 3. Build the driver
     ```bash
-    make clean all
+    make clean all BOARD=RPI5
     ```
+
+### Fork workflow (publish to your GitHub)
+
+If you want to push changes to your own repository instead of the original source repository:
+
+1. Fork both repositories on GitHub:
+    - `nrf70-linux-driver`
+    - `sdk-nrfxlib` (if you changed `../nrfxlib`)
+
+    If you want to initialize a fresh workspace directly from your fork:
+    ```bash
+    west init -m https://github.com/<your-user>/nrf70-linux-driver.git --mr main
+    ```
+
+2. In your local `nrf70-linux-driver` clone, set remotes:
+    ```bash
+    git remote rename origin upstream
+    git remote add origin git@github.com:<your-user>/nrf70-linux-driver.git
+    git fetch origin upstream
+    ```
+
+3. Push your branch to your fork:
+    ```bash
+    git push -u origin <your-branch>
+    ```
+
+4. Keep syncing from upstream when needed:
+    ```bash
+    git fetch upstream
+    git rebase upstream/main
+    ```
+
+### Handling `../nrfxlib` changes
+
+`nrfxlib` is a separate git repository and must be versioned independently from `nrf70-linux-driver`.
+
+Recommended approach:
+
+1. Commit and push your `nrfxlib` changes to your `sdk-nrfxlib` fork.
+2. In your `nrf70-linux-driver` fork, update `west.yml` so `nrfxlib` points to your fork and your commit SHA.
+
+Example (`west.yml`) update:
+
+```yaml
+manifest:
+  remotes:
+    - name: myfork
+      url-base: https://github.com/<your-user>
+  projects:
+    - name: nrfxlib
+      remote: myfork
+      repo-path: sdk-nrfxlib
+      revision: <nrfxlib-commit-sha>
+```
+
+Then refresh your workspace:
+
+```bash
+west update nrfxlib
+```
+
+This makes your driver repository reproducible because it records the exact external `nrfxlib` revision required.
 
 ### Driver feature configuration
 
@@ -80,25 +142,25 @@ nRF70 driver has feature flags to enable/disable certain features. These flags c
     make clean all MODE=STA LOW_POWER=1
     ```
 
-Ensure that the `nrf_wifi_fmac_sta.ko` and `dts/nrf70_rpi_interposer.dtbo` files are generated.
+Ensure that the `nrf_wifi_fmac_sta.ko` and `dts/nrf70_rpi5_interposer.dtbo` files are generated.
 ## Run the driver
 1. Load the DTS overlay
 
-   a. Permanent loading: Configure the Raspberry Pi4B to load the DTS overlay at boot time (Recommended for production)
+    a. Permanent loading: Configure the Raspberry Pi 5 to load the DTS overlay at boot time (Recommended for production)
     ```bash
-    sudo cp dts/nrf70_rpi_interposer.dtbo /boot/firmware/overlays/
+     sudo cp dts/nrf70_rpi5_interposer.dtbo /boot/firmware/overlays/
     # Update config.txt
     sudo vim /boot/firmware/config.txt
     # Add below line at the end of the file
-    dtoverlay=nrf70_rpi_interposer
+     dtoverlay=nrf70_rpi5_interposer
     sudo reboot
     ```
    b. Runtime loading: Load the DTS overlay at runtime (Helpful for development)
     ```bash
-    sudo dtoverlay dts/nrf70_rpi_interposer.dtbo
+     sudo dtoverlay dts/nrf70_rpi5_interposer.dtbo
     ```
 
-    Note 1: Using this procedure, the DTS overlay must be loaded every time the Raspberry Pi4B is rebooted.
+     Note 1: Using this procedure, the DTS overlay must be loaded every time the Raspberry Pi 5 is rebooted.
 
     Note 2: Using this procedure, in the `dmesg` ignore the warnings `OF: overlay: WARNING: memory leak will occur if overlay removed, property: ******`, these are expected as we are dynamically loading the DTS.
 2. Load the driver
@@ -106,7 +168,7 @@ Ensure that the `nrf_wifi_fmac_sta.ko` and `dts/nrf70_rpi_interposer.dtbo` files
     sudo insmod nrf_wifi_fmac_sta.ko
     ```
 
-    Note 1: Using this procedure, the driver must be loaded every time the Raspberry Pi4B is rebooted.
+    Note 1: Using this procedure, the driver must be loaded every time the Raspberry Pi 5 is rebooted.
 
     Note 2: Using this procedure, in the `dmesg` ignore the warnings `nrf_wifi_fmac_sta: loading out-of-tree module taints kernel`, these are expected as we are loading a out-of-tree module.
 
@@ -190,6 +252,56 @@ Ensure that the `nrf_wifi_fmac_sta.ko` and `dts/nrf70_rpi_interposer.dtbo` files
     cat /var/log/kern.log* > kern.log
     ```
 
+## Stability gate soak (repeatable)
+
+Use the archived soak gate script to run the same guarded long-run recipe after kernel, firmware, or driver changes.
+
+### What this gate does
+- Reconnects `nrf_wifi` using `wpa_supplicant` and `dhclient`
+- Runs concurrent ping (`1.1.1.1`, 1200-byte payload, `0.4s` interval)
+- Runs `50` TLS downloads of `10Mb.dat` with:
+    - `curl --interface nrf_wifi --http1.1 --tls-max 1.2`
+    - `--resolve proof.ovh.net:443:141.95.207.211`
+    - per-trial timeout `110s`
+- Captures guarded kernel markers every 5 trials and interface snapshots every 10 trials
+- Fails if any download fails or if guarded marker signatures are present
+
+### Run the gate
+```bash
+chmod +x scripts/ci/stability_soak_gate.sh
+scripts/ci/stability_soak_gate.sh
+```
+
+Optional example with explicit parameters:
+```bash
+scripts/ci/stability_soak_gate.sh \
+    --iface nrf_wifi \
+    --wpa-conf ~/nrf_wifi_wpa_supplicant.conf \
+    --trials 50 \
+    --checkpoint-every 5 \
+    --ifstats-every 10
+```
+
+### Artifact archive
+Each run creates a timestamped folder under:
+```bash
+artifacts/soak-gate/<YYYYMMDD-HHMMSS>/
+```
+
+Key files:
+- `summary.txt`
+- `final_kernel_markers.log`
+- `final_ifstats.txt`
+- `final_iw.txt`
+- `ping.log`
+- `checkpoints/markers-*.log`
+- `checkpoints/ifstats-*.txt`
+- `trials/soak-*.curl.log`
+
+### Pass/Fail criteria
+- PASS: all trials succeeded and `final_kernel_markers.log` is empty
+- FAIL: any trial failed or any guarded marker matched
+
 ## Collect Sniffer logs
 
 The procedure to collect sniffer logs is outside the scope of this document as it depends heavily on the environment and the sniffer used.
@@ -200,9 +312,9 @@ RADIO-TEST mode is used to characterize TX/RX functionalities of RPU with differ
 
 1. To build the driver with RADIO-TEST mode
    ```bash
-    make clean all MODE=RADIO-TEST LOW_POWER=1
+     make clean all BOARD=RPI5 MODE=RADIO-TEST LOW_POWER=1
     ```
-   Ensure that the `rf_wifi_fmac_radio_test.ko` and `dts/nrf70_rpi_interposer.dtbo` files are generated.
+    Ensure that the `rf_wifi_fmac_radio_test.ko` and `dts/nrf70_rpi5_interposer.dtbo` files are generated.
 2. Load the driver
     ```bash
     sudo insmod nrf_wifi_fmac_radio_test.ko
