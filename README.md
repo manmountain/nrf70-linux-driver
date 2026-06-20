@@ -110,7 +110,7 @@ Example (`west.yml`) update:
 manifest:
   remotes:
     - name: myfork
-            url-base: https://github.com/manmountain
+      url-base: https://github.com/manmountain
   projects:
     - name: nrfxlib
       remote: myfork
@@ -139,7 +139,7 @@ nRF70 driver has feature flags to enable/disable certain features. These flags c
 
 1. Build the driver in STA mode with low power enabled
     ```bash
-    make clean all MODE=STA LOW_POWER=1
+    make clean all BOARD=RPI5 MODE=STA LOW_POWER=1
     ```
 
 Ensure that the `nrf_wifi_fmac_sta.ko` and `dts/nrf70_rpi5_interposer.dtbo` files are generated.

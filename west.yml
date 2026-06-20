@@ -3,12 +3,12 @@
 
 manifest:
   remotes:
-    - name: ncs
-      url-base: https://github.com/nrfconnect
+    - name: myfork
+      url-base: https://github.com/manmountain
 
   projects:
     # TODO: Once west supports sparse checkout, we should use it here.
     - name: nrfxlib
-      remote: ncs
+      remote: myfork
       repo-path: sdk-nrfxlib
-      revision: 2fe3e8248e16a52cf530358815d19617cb96c1d1
+      revision: ad0529d028ec3ba6b8283bcc76e546912f39f378
