@@ -74,13 +74,13 @@ If you want to push changes to your own repository instead of the original sourc
 
     If you want to initialize a fresh workspace directly from your fork:
     ```bash
-    west init -m https://github.com/<your-user>/nrf70-linux-driver.git --mr main
+    west init -m https://github.com/manmountain/nrf70-linux-driver.git --mr main
     ```
 
 2. In your local `nrf70-linux-driver` clone, set remotes:
     ```bash
     git remote rename origin upstream
-    git remote add origin git@github.com:<your-user>/nrf70-linux-driver.git
+    git remote add origin https://github.com/manmountain/nrf70-linux-driver.git
     git fetch origin upstream
     ```
 
@@ -110,7 +110,7 @@ Example (`west.yml`) update:
 manifest:
   remotes:
     - name: myfork
-      url-base: https://github.com/<your-user>
+            url-base: https://github.com/manmountain
   projects:
     - name: nrfxlib
       remote: myfork
