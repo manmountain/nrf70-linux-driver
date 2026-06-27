@@ -69,6 +69,10 @@ ieee80211_default_mgmt_stypes[NUM_NL80211_IFTYPES] = {
 			BIT(IEEE80211_STYPE_DEAUTH >> 4) |
 			BIT(IEEE80211_STYPE_ACTION >> 4),
 	},
+	[NL80211_IFTYPE_MONITOR] = {
+		.tx = 0x0000,
+		.rx = 0xffff,
+	},
 	[NL80211_IFTYPE_MESH_POINT] = {
 		.tx = 0xffff,
 		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |

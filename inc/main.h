@@ -83,4 +83,11 @@ void nrf_wifi_fmac_dev_rem_lnx(struct nrf_wifi_ctx_lnx *rpu_ctx_lnx);
 enum nrf_wifi_status
 nrf_wifi_fmac_dev_init_lnx(struct nrf_wifi_ctx_lnx *rpu_ctx_lnx);
 void nrf_wifi_fmac_dev_deinit_lnx(struct nrf_wifi_ctx_lnx *rpu_ctx_lnx);
+
+#ifdef CONFIG_NRF700X_RAW_DATA_RX
+void nrf_wifi_rx_sniffer_frm_callbk_fn(void *os_vif_ctx,
+					void *frm,
+					struct raw_rx_pkt_header *raw_rx_hdr,
+					bool pkt_free);
+#endif /* CONFIG_NRF700X_RAW_DATA_RX */
 #endif /* __MAIN_H__ */

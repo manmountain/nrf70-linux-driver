@@ -9,6 +9,8 @@
 #include "fmac_main.h"
 #include "net_stack.h"
 #include "fmac_api.h"
+#include "fmac_api_common.h"
+#include "host_rpu_sys_if.h"
 #include <linux/version.h>
 
 extern const struct ieee80211_txrx_stypes ieee80211_default_mgmt_stypes[];
@@ -136,6 +138,20 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 
 	vif_ctx_lnx = netdev_priv(netdev);
 	rpu_ctx_lnx = vif_ctx_lnx->rpu_ctx;
+
+	/* Monitor mode uses a separate raw-mode firmware command path */
+	if (iftype == NL80211_IFTYPE_MONITOR) {
+		status = nrf_wifi_fmac_set_mode(rpu_ctx_lnx->rpu_ctx,
+						vif_ctx_lnx->if_idx,
+						NRF_WIFI_MONITOR_MODE);
+		if (status != NRF_WIFI_STATUS_SUCCESS) {
+			pr_err("%s: nrf_wifi_fmac_set_mode(MONITOR) failed\n",
+			       __func__);
+			return -EIO;
+		}
+		wdev->iftype = NL80211_IFTYPE_MONITOR;
+		return 0;
+	}
 
 	vif_info = kzalloc(sizeof(*vif_info), GFP_KERNEL);
 
@@ -2341,6 +2357,47 @@ out:
 	return status;
 }
 
+static int nrf_wifi_cfg80211_set_monitor_channel(struct wiphy *wiphy,
+							 struct net_device *dev,
+							 struct cfg80211_chan_def *chandef)
+{
+	struct nrf_wifi_ctx_lnx *rpu_ctx_lnx = NULL;
+	struct nrf_wifi_fmac_vif_ctx_lnx *vif_ctx_lnx = NULL;
+	unsigned int channel = 0;
+	int status = 0;
+
+	if (!wiphy || !chandef || !chandef->chan)
+		return -EINVAL;
+
+	rpu_ctx_lnx = wiphy_priv(wiphy);
+
+	if (dev)
+		vif_ctx_lnx = netdev_priv(dev);
+	else
+		vif_ctx_lnx = rpu_ctx_lnx->def_vif_ctx;
+
+	if (!vif_ctx_lnx)
+		return -ENODEV;
+
+	if (!vif_ctx_lnx->wdev ||
+	    vif_ctx_lnx->wdev->iftype != NL80211_IFTYPE_MONITOR)
+		return -EOPNOTSUPP;
+
+	channel = ieee80211_frequency_to_channel(chandef->chan->center_freq);
+	if (!channel)
+		return -EINVAL;
+
+	status = nrf_wifi_fmac_set_channel(rpu_ctx_lnx->rpu_ctx,
+					   vif_ctx_lnx->if_idx,
+					   channel);
+	if (status != NRF_WIFI_STATUS_SUCCESS) {
+		pr_err("%s: nrf_wifi_fmac_set_channel failed\n", __func__);
+		return -EIO;
+	}
+
+	return 0;
+}
+
 int nrf_wifi_cfg80211_set_wiphy_params(struct wiphy *wiphy,
 				       unsigned int changed)
 {
@@ -2494,6 +2551,7 @@ struct cfg80211_ops cfg80211_ops = {
 
 	.change_bss = nrf_wifi_cfg80211_chg_bss,
 	.set_txq_params = nrf_wifi_cfg80211_set_txq_params,
+	.set_monitor_channel = nrf_wifi_cfg80211_set_monitor_channel,
 
 	.scan = nrf_wifi_cfg80211_scan,
 	.auth = nrf_wifi_cfg80211_auth,
@@ -2652,7 +2710,10 @@ void wiphy_init(struct wiphy *wiphy)
 
 	wiphy->interface_modes =
 		BIT(NL80211_IFTYPE_STATION) | BIT(NL80211_IFTYPE_AP) |
-		BIT(NL80211_IFTYPE_P2P_GO) | BIT(NL80211_IFTYPE_P2P_CLIENT);
+		BIT(NL80211_IFTYPE_P2P_GO) | BIT(NL80211_IFTYPE_P2P_CLIENT) |
+		BIT(NL80211_IFTYPE_MONITOR);
+
+	wiphy->features |= NL80211_FEATURE_ACTIVE_MONITOR;
 
 	wiphy->max_scan_ssids = 4;
 	wiphy->max_scan_ie_len = IEEE80211_MAX_DATA_LEN;

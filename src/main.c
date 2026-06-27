@@ -726,6 +726,35 @@ static void nrf_wifi_process_rssi_from_rx(void *os_vif_ctx, signed short signal)
 }
 #endif /* CONFIG_NRF700X_STA_MODE */
 
+#ifdef CONFIG_NRF700X_RAW_DATA_RX
+void nrf_wifi_rx_sniffer_frm_callbk_fn(void *os_vif_ctx,
+					void *frm,
+					struct raw_rx_pkt_header *raw_rx_hdr,
+					bool pkt_free)
+{
+	struct nrf_wifi_fmac_vif_ctx_lnx *vif_ctx_lnx = os_vif_ctx;
+	struct sk_buff *skb = frm;
+	struct net_device *netdev;
+
+	if (!vif_ctx_lnx || !skb)
+		goto out;
+
+	netdev = vif_ctx_lnx->netdev;
+	if (!netdev)
+		goto out;
+
+	skb->dev = netdev;
+	skb->protocol = htons(ETH_P_802_2);
+	skb->ip_summed = CHECKSUM_NONE;
+
+	netif_rx(skb);
+	return;
+out:
+	if (pkt_free && skb)
+		dev_kfree_skb(skb);
+}
+#endif /* CONFIG_NRF700X_RAW_DATA_RX */
+
 void nrf_wifi_set_if_callbk_fn(
 	void *os_vif_ctx,
 	struct nrf_wifi_umac_event_set_interface *set_if_event,
@@ -932,7 +961,9 @@ int __init nrf_wifi_init_lnx(void)
 		&nrf_wifi_cfg80211_roc_cancel_callbk_fn;
 	callbk_fns.tx_status_callbk_fn = &nrf_wifi_cfg80211_tx_status_callbk_fn;
 	callbk_fns.reg_change_callbk_fn = &nrf_wifi_reg_change_callbk_fn;
-
+#ifdef CONFIG_NRF700X_RAW_DATA_RX
+	callbk_fns.rx_sniffer_frm_callbk_fn = &nrf_wifi_rx_sniffer_frm_callbk_fn;
+#endif
 	callbk_fns.twt_config_callbk_fn = &nrf_wifi_twt_config_callbk_fn;
 	callbk_fns.twt_teardown_callbk_fn = &nrf_wifi_twt_teardown_callbk_fn;
 #ifdef CONFIG_NRF_WIFI_LOW_POWER
