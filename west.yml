@@ -7,7 +7,6 @@ manifest:
       url-base: https://github.com/manmountain
 
   projects:
-    # TODO: Once west supports sparse checkout, we should use it here.
     - name: nrfxlib
       remote: myfork
       repo-path: sdk-nrfxlib
