@@ -154,3 +154,160 @@ sudo killall wpa_supplicant 2>/dev/null || true
 sudo dhclient -r nrf_wifi 2>/dev/null || true
 sudo rmmod nrf_wifi_fmac_sta
 ```
+
+## 7. WFB TX over monitor mode (camera + test source)
+
+This section uses the stable TX settings validated in this repo:
+
+- `-Q` enabled (qdisc path)
+- `-F 3000 -J 4 -E 5000 -R 8388608 -l 1000`
+
+### 7.1 Prepare monitor interface
+
+```bash
+sudo ip link set nrf_wifi down
+sudo iw dev nrf_wifi set monitor otherbss
+sudo iw reg set BO
+sudo ip link set nrf_wifi up
+sudo iw dev nrf_wifi set channel 149 HT20
+ip link show nrf_wifi && iw dev nrf_wifi info
+```
+
+### 7.2 Queue/buffer tuning (required)
+
+Apply these before running `wfb_tx`:
+
+```bash
+sudo sysctl -w net.core.wmem_max=16777216
+sudo sysctl -w net.core.wmem_default=4194304
+sudo ip link set dev nrf_wifi txqueuelen 5000
+```
+
+### 7.3 Terminal 1: start `wfb_tx`
+
+Run from your `wfb-ng` checkout:
+
+```bash
+cd /home/goran/Source/wfb-ng
+sudo ./wfb_tx -p 0 -u 5602 -K drone.key nrf_wifi \
+  -F 3000 -J 4 -E 5000 -R 8388608 -l 1000 -Q
+```
+
+### 7.4 Terminal 2A: DSI camera source (libcamera)
+
+Uses Raspberry Pi camera stack and pushes H.264 into `wfb_tx` via UDP localhost.
+
+```bash
+libcamera-vid -n -t 0 \
+  --width 1280 --height 720 --framerate 30 --bitrate 4000000 \
+  --inline --codec h264 -o - | \
+gst-launch-1.0 -v fdsrc ! h264parse ! mpegtsmux alignment=7 ! \
+  udpsink host=127.0.0.1 port=5602 buffer-size=1048576 sync=false async=false
+```
+
+If needed, lower camera load first:
+
+```bash
+libcamera-vid -n -t 0 \
+  --width 640 --height 360 --framerate 24 --bitrate 1200000 \
+  --inline --codec h264 -o - | \
+gst-launch-1.0 -v fdsrc ! h264parse ! mpegtsmux alignment=7 ! \
+  udpsink host=127.0.0.1 port=5602 buffer-size=1048576 sync=false async=false
+```
+
+### 7.5 Terminal 2B: synthetic test source (no camera required)
+
+```bash
+gst-launch-1.0 -v \
+  videotestsrc is-live=true pattern=ball ! \
+  video/x-raw,width=320,height=180,framerate=16/1 ! \
+  videoconvert ! \
+  openh264enc bitrate=250000 complexity=low gop-size=32 ! \
+  h264parse ! mpegtsmux alignment=7 ! \
+  udpsink host=127.0.0.1 port=5602 buffer-size=1048576 sync=false async=false
+```
+
+### 7.6 Expected behavior
+
+- `wfb_tx` `TX_ANT` should show non-zero injected and zero/near-zero dropped.
+- `PKT` should show non-zero incoming and injected.
+
+### 7.7 Optional diagnostics
+
+If drops reappear, trace send errors:
+
+```bash
+cd /home/goran/Source/wfb-ng
+sudo strace -f -tt -e trace=sendmsg -o /tmp/wfb_sendmsg.strace \
+  ./wfb_tx -p 0 -u 5602 -K drone.key nrf_wifi \
+  -F 3000 -J 4 -E 5000 -R 8388608 -l 1000 -Q
+
+grep -oE 'sendmsg\([^)]*\) = -1 [A-Z0-9_]+' /tmp/wfb_sendmsg.strace | \
+  awk '{print $NF}' | sort | uniq -c | sort -nr
+```
+
+### 7.8 Ground station (receive commands)
+
+Run these on the ground station side (receiver), using the same channel and key.
+
+Ground station monitor setup:
+
+```bash
+sudo ip link set nrf_wifi down
+sudo iw dev nrf_wifi set monitor otherbss
+sudo iw reg set BO
+sudo ip link set nrf_wifi up
+sudo iw dev nrf_wifi set channel 149 HT20
+ip link show nrf_wifi && iw dev nrf_wifi info
+```
+
+Terminal 1: run `wfb_rx` and forward recovered stream to localhost UDP 5600:
+
+```bash
+cd /home/goran/Source/wfb-ng
+sudo ./wfb_rx -p 0 -u 5600 -K drone.key nrf_wifi -l 1000
+```
+
+Terminal 2A: live video preview from recovered MPEG-TS stream:
+
+```bash
+gst-launch-1.0 -v \
+  udpsrc port=5600 buffer-size=1048576 ! \
+  tsdemux ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false
+```
+
+Terminal 2B: optional record recovered stream to file:
+
+```bash
+gst-launch-1.0 -e -v \
+  udpsrc port=5600 buffer-size=1048576 ! \
+  filesink location=rx_capture.ts
+```
+
+### 7.9 TX host / RX host checklist (must match)
+
+Before debugging drops, verify these parameters are aligned on both sides:
+
+- Key file: TX `-K` and RX `-K` must be the same key content.
+- Channel + width: both hosts set the same channel and `HT20`/band settings.
+- Radio port: TX `-p` equals RX `-p`.
+- Link ID / epoch (if used): TX `-i`/`-e` must match RX `-i`/`-e`.
+- Interface mode: both interfaces are in monitor mode and `UP`.
+- Region/regulatory domain: both hosts use the same `iw reg` domain.
+- Local UDP handoff: TX app sends to `wfb_tx -u` port; RX app reads from `wfb_rx -u` port.
+- Time sanity: host clocks should be roughly sane (no extreme drift).
+
+Quick check commands:
+
+```bash
+# On both TX and RX hosts
+ip link show nrf_wifi
+iw dev nrf_wifi info
+iw reg get | head -n 20
+
+# On TX host
+pgrep -af wfb_tx
+
+# On RX host
+pgrep -af wfb_rx
+```
