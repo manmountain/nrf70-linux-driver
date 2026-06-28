@@ -10,6 +10,7 @@
 #include "net_stack.h"
 #include "fmac_api.h"
 #include "fmac_api_common.h"
+#include "fmac_util.h"
 #include "host_rpu_sys_if.h"
 #include <linux/version.h>
 
@@ -139,7 +140,15 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 	vif_ctx_lnx = netdev_priv(netdev);
 	rpu_ctx_lnx = vif_ctx_lnx->rpu_ctx;
 
-	/* Monitor mode uses a separate raw-mode firmware command path */
+	/* Monitor mode uses a separate raw-mode firmware command path.
+	 * The firmware only reliably accepts plain MONITOR_MODE (0x2); the
+	 * combined MONITOR|TX_INJECTION mode byte is not echoed back in the
+	 * response event, so the nrfxlib event handler never promotes if_type
+	 * to MONITOR_TX_INJECTOR.  Work around this by:
+	 *   1. Sending only MONITOR_MODE to the firmware (which it accepts).
+	 *   2. Directly forcing the nrfxlib VIF internal state to
+	 *      MONITOR_TX_INJECTOR so raw TX commands are accepted.
+	 */
 	if (iftype == NL80211_IFTYPE_MONITOR) {
 		status = nrf_wifi_fmac_set_mode(rpu_ctx_lnx->rpu_ctx,
 						vif_ctx_lnx->if_idx,
@@ -149,7 +158,35 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 			       __func__);
 			return -EIO;
 		}
+
+#ifdef CONFIG_NRF700X_RAW_DATA_TX
+		{
+			struct nrf_wifi_fmac_dev_ctx *fmac_dev_ctx =
+				rpu_ctx_lnx->rpu_ctx;
+			struct nrf_wifi_fmac_dev_ctx_def *def_dev_ctx =
+				wifi_dev_priv(fmac_dev_ctx);
+			struct nrf_wifi_fmac_vif_ctx *fmac_vif =
+				def_dev_ctx->vif_ctx[vif_ctx_lnx->if_idx];
+
+			if (fmac_vif) {
+				fmac_vif->if_type = NRF_WIFI_MONITOR_TX_INJECTOR;
+				fmac_vif->txinjection_mode = true;
+				def_dev_ctx->tx_config.peers[MAX_PEERS].peer_id =
+					MAX_PEERS;
+				def_dev_ctx->tx_config.peers[MAX_PEERS].if_idx =
+					vif_ctx_lnx->if_idx;
+				pr_debug("%s: forced MONITOR_TX_INJECTOR on if_idx=%d\n",
+					 __func__, vif_ctx_lnx->if_idx);
+			}
+		}
+#endif
 		wdev->iftype = NL80211_IFTYPE_MONITOR;
+
+		/* Monitor interfaces have no association event to drive carrier
+		 * state.  Force carrier on so raw socket sendto() does not get
+		 * ENETDOWN and wfb_tx does not report dropped packets. */
+		netif_carrier_on(netdev);
+
 		return 0;
 	}
 

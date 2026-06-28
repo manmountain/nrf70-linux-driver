@@ -7,6 +7,7 @@
 
 #include <net/cfg80211.h>
 #include <linux/etherdevice.h>
+#include <net/ieee80211_radiotap.h>
 #include <linux/rtnetlink.h>
 
 #include "host_rpu_umac_if.h"
@@ -18,17 +19,137 @@
 
 #ifdef CONFIG_NRF700X_DATA_TX
 
+#ifdef CONFIG_NRF700X_RAW_DATA_TX
+static unsigned char nrf_wifi_map_radiotap_rate(unsigned char rt_rate)
+{
+	if (rt_rate == 11)
+		return 55;
+
+	if (!(rt_rate & 1))
+		return rt_rate / 2;
+
+	return 0;
+}
+
+static void nrf_wifi_parse_radiotap_tx_meta(struct sk_buff *skb,
+					     struct raw_tx_pkt_header *raw_hdr)
+{
+	struct ieee80211_radiotap_iterator iter;
+	unsigned char *arg = NULL;
+	int ret = 0;
+
+	if (!skb || !raw_hdr)
+		return;
+
+	ret = ieee80211_radiotap_iterator_init(&iter,
+					      (struct ieee80211_radiotap_header *)skb->data,
+					      skb->len,
+					      NULL);
+	if (ret)
+		return;
+
+	while ((ret = ieee80211_radiotap_iterator_next(&iter)) == 0) {
+		arg = iter.this_arg;
+
+		switch (iter.this_arg_index) {
+		case IEEE80211_RADIOTAP_RATE:
+			if (arg) {
+				unsigned char mapped_rate =
+					nrf_wifi_map_radiotap_rate(arg[0]);
+
+				if (mapped_rate) {
+					raw_hdr->tx_mode =
+						NRF_WIFI_FMAC_RAWTX_MODE_LEGACY;
+					raw_hdr->data_rate = mapped_rate;
+				}
+			}
+			break;
+		case IEEE80211_RADIOTAP_MCS:
+			if (arg && (arg[0] & IEEE80211_RADIOTAP_MCS_HAVE_MCS)) {
+				raw_hdr->tx_mode = NRF_WIFI_FMAC_RAWTX_MODE_HT;
+				raw_hdr->data_rate = min_t(unsigned char, arg[2], 7);
+			}
+			break;
+		case IEEE80211_RADIOTAP_VHT:
+			/* VHT field: 2B known, 1B flags, 1B bw, 4B mcs_nss[], ...
+			 * mcs_nss[0] is at offset 4 - need at least 5 bytes. */
+			if (arg && iter.this_arg_size >= 5) {
+				unsigned char mcs_nss = arg[4];
+
+				raw_hdr->tx_mode = NRF_WIFI_FMAC_RAWTX_MODE_VHT;
+				raw_hdr->data_rate = min_t(unsigned char,
+						   (mcs_nss >> 4) & 0x0f,
+						   9);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+static int nrf_wifi_prepare_monitor_tx_skb(struct sk_buff *skb)
+{
+	struct raw_tx_pkt_header raw_hdr = {0};
+	struct ieee80211_radiotap_header *rtap = NULL;
+	u16 rtap_len = 0;
+	u32 magic_num = 0;
+
+	if (!skb)
+		return -EINVAL;
+
+	if (skb->len >= sizeof(struct raw_tx_pkt_header)) {
+		memcpy(&magic_num, skb->data, sizeof(magic_num));
+		if (magic_num == NRF_WIFI_MAGIC_NUM_RAWTX)
+			return 0;
+	}
+
+	if (skb->len >= sizeof(*rtap)) {
+		rtap = (struct ieee80211_radiotap_header *)skb->data;
+
+		if (rtap->it_version == 0) {
+			rtap_len = le16_to_cpu(rtap->it_len);
+			if (rtap_len >= sizeof(*rtap) && rtap_len <= skb->len) {
+				nrf_wifi_parse_radiotap_tx_meta(skb, &raw_hdr);
+				skb_pull(skb, rtap_len);
+			}
+		}
+	}
+
+	if (skb->len > U16_MAX)
+		return -EINVAL;
+
+	if (skb_cow_head(skb, sizeof(struct raw_tx_pkt_header)))
+		return -ENOMEM;
+
+	raw_hdr.magic_num = NRF_WIFI_MAGIC_NUM_RAWTX;
+	if (raw_hdr.tx_mode == 0 && raw_hdr.data_rate == 0) {
+		raw_hdr.tx_mode = NRF_WIFI_FMAC_RAWTX_MODE_LEGACY;
+		raw_hdr.data_rate = 0;
+	}
+	raw_hdr.packet_length = skb->len;
+	raw_hdr.queue = NRF_WIFI_FMAC_AC_BE;
+	raw_hdr.raw_tx_flag = 1;
+
+	memcpy(skb_push(skb, sizeof(raw_hdr)), &raw_hdr, sizeof(raw_hdr));
+
+	return 0;
+}
+#endif /* CONFIG_NRF700X_RAW_DATA_TX */
+
 static void nrf_cfg80211_data_tx_routine(struct work_struct *w)
 {
 	struct nrf_wifi_fmac_vif_ctx_lnx *vif_ctx_lnx =
 		container_of(w, struct nrf_wifi_fmac_vif_ctx_lnx, ws_data_tx);
 	struct nrf_wifi_ctx_lnx *rpu_ctx_lnx = NULL;
 	struct nrf_wifi_fmac_dev_ctx *fmac_dev_ctx = NULL;
+	struct nrf_wifi_fmac_dev_ctx_def *def_dev_ctx = NULL;
 	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
 	void *netbuf = NULL;
 
 	rpu_ctx_lnx = vif_ctx_lnx->rpu_ctx;
 	fmac_dev_ctx = rpu_ctx_lnx->rpu_ctx;
+	def_dev_ctx = wifi_dev_priv(fmac_dev_ctx);
 
 	netbuf = nrf_wifi_utils_q_dequeue(fmac_dev_ctx->fpriv->opriv,
 					  vif_ctx_lnx->data_txq);
@@ -37,12 +158,66 @@ static void nrf_cfg80211_data_tx_routine(struct work_struct *w)
 		return;
 	}
 
+	if (vif_ctx_lnx->wdev &&
+	    vif_ctx_lnx->wdev->iftype == NL80211_IFTYPE_MONITOR) {
+		def_dev_ctx->raw_tx_dequeued_pkts += 1;
+	}
+
+#ifdef CONFIG_NRF700X_RAW_DATA_TX
+	if (vif_ctx_lnx->wdev &&
+	    vif_ctx_lnx->wdev->iftype == NL80211_IFTYPE_MONITOR) {
+		struct nrf_wifi_fmac_vif_ctx *fmac_vif =
+			def_dev_ctx->vif_ctx[vif_ctx_lnx->if_idx];
+
+		/* Firmware mode event may report plain MONITOR and overwrite
+		 * injector if_type. Re-assert injection mode right before raw TX. */
+		if (fmac_vif) {
+			fmac_vif->if_type = NRF_WIFI_MONITOR_TX_INJECTOR;
+			fmac_vif->txinjection_mode = true;
+			def_dev_ctx->tx_config.peers[MAX_PEERS].peer_id = MAX_PEERS;
+			def_dev_ctx->tx_config.peers[MAX_PEERS].if_idx =
+				vif_ctx_lnx->if_idx;
+		}
+
+		status = nrf_wifi_prepare_monitor_tx_skb(netbuf);
+		if (status) {
+			pr_err_ratelimited("%s: monitor tx frame preparation failed (%d)\n",
+					   __func__,
+					   status);
+			def_dev_ctx->raw_tx_prep_fail_pkts += 1;
+			nrf_wifi_osal_nbuf_free(fmac_dev_ctx->fpriv->opriv, netbuf);
+			goto resched;
+		}
+
+		status = nrf_wifi_fmac_start_rawpkt_xmit(rpu_ctx_lnx->rpu_ctx,
+							vif_ctx_lnx->if_idx,
+							netbuf);
+		if (status != NRF_WIFI_STATUS_SUCCESS) {
+			pr_err_ratelimited(
+				"%s: rawpkt_xmit failed status=%d if_idx=%d if_type=%d txinj=%d\n",
+				__func__,
+				status,
+				vif_ctx_lnx->if_idx,
+				fmac_vif ? fmac_vif->if_type : -1,
+				fmac_vif ? fmac_vif->txinjection_mode : -1);
+			def_dev_ctx->raw_tx_sent_fail_pkts += 1;
+			nrf_wifi_osal_nbuf_free(fmac_dev_ctx->fpriv->opriv, netbuf);
+		} else {
+			def_dev_ctx->raw_tx_sent_ok_pkts += 1;
+		}
+
+		goto resched;
+	}
+#endif
+
 	status = nrf_wifi_fmac_start_xmit(rpu_ctx_lnx->rpu_ctx,
 					  vif_ctx_lnx->if_idx, netbuf);
 	if (status != NRF_WIFI_STATUS_SUCCESS) {
 		pr_err("%s: nrf_wifi_fmac_start_xmit failed\n", __func__);
 	}
 
+
+resched:
 	if (nrf_wifi_utils_q_len(fmac_dev_ctx->fpriv->opriv,
 				 vif_ctx_lnx->data_txq) > 0) {
 		schedule_work(&vif_ctx_lnx->ws_data_tx);
@@ -132,6 +307,15 @@ int nrf_wifi_netdev_open(struct net_device *netdev)
 	vif_ctx_lnx = netdev_priv(netdev);
 	rpu_ctx_lnx = vif_ctx_lnx->rpu_ctx;
 
+	/* Monitor interfaces have no association and the firmware does not
+	 * drive carrier state for them.  Just bring carrier up directly so
+	 * raw socket sendto() does not return ENETDOWN. */
+	if (vif_ctx_lnx->wdev &&
+	    vif_ctx_lnx->wdev->iftype == NL80211_IFTYPE_MONITOR) {
+		netif_carrier_on(netdev);
+		return 0;
+	}
+
 	vif_info = kzalloc(sizeof(*vif_info), GFP_KERNEL);
 
 	if (!vif_info) {
@@ -167,6 +351,13 @@ int nrf_wifi_netdev_close(struct net_device *netdev)
 
 	vif_ctx_lnx = netdev_priv(netdev);
 	rpu_ctx_lnx = vif_ctx_lnx->rpu_ctx;
+
+	/* Mirror the open shortcut: monitor interfaces bypass firmware state. */
+	if (vif_ctx_lnx->wdev &&
+	    vif_ctx_lnx->wdev->iftype == NL80211_IFTYPE_MONITOR) {
+		netif_carrier_off(netdev);
+		return 0;
+	}
 
 	vif_info = kzalloc(sizeof(*vif_info), GFP_KERNEL);
 

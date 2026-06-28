@@ -8,12 +8,14 @@
 
 #include "fmac_api.h"
 #include "fmac_dbgfs_if.h"
+#include "fmac_util.h"
 
 #ifndef CONFIG_NRF700X_RADIO_TEST
 static void nrf_wifi_wlan_fmac_dbgfs_stats_show_host(
 	struct seq_file *m, struct nrf_wifi_fmac_dev_ctx *fmac_dev_ctx,
 	struct rpu_host_stats *stats)
 {
+	struct nrf_wifi_fmac_dev_ctx_def *def_dev_ctx = wifi_dev_priv(fmac_dev_ctx);
 #ifdef DEBUG_MODE_SUPPORT
 	int i = 0;
 	unsigned int cnt = 0;
@@ -23,6 +25,15 @@ static void nrf_wifi_wlan_fmac_dbgfs_stats_show_host(
 	seq_printf(m, "total_tx_pkts =%llu\n", stats->total_tx_pkts);
 	seq_printf(m, "total_tx_done_pkts = %llu\n", stats->total_tx_done_pkts);
 	seq_printf(m, "total_rx_pkts = %llu\n", stats->total_rx_pkts);
+	seq_puts(m, "\n************* RAW TX DIAGNOSTICS ***********\n");
+	seq_printf(m, "raw_tx_dequeued_pkts = %llu\n",
+		   def_dev_ctx->raw_tx_dequeued_pkts);
+	seq_printf(m, "raw_tx_prep_fail_pkts = %llu\n",
+		   def_dev_ctx->raw_tx_prep_fail_pkts);
+	seq_printf(m, "raw_tx_sent_ok_pkts = %llu\n",
+		   def_dev_ctx->raw_tx_sent_ok_pkts);
+	seq_printf(m, "raw_tx_sent_fail_pkts = %llu\n",
+		   def_dev_ctx->raw_tx_sent_fail_pkts);
 #ifdef DEBUG_MODE_SUPPORT
 
 	for (i = 0; i < fmac_dev_ctx->fpriv->data_config.max_tx_aggregation;
