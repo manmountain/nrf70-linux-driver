@@ -197,20 +197,26 @@ sudo ./wfb_tx -p 0 -u 5602 -K drone.key nrf_wifi \
 
 Uses Raspberry Pi camera stack and pushes H.264 into `wfb_tx` via UDP localhost.
 
+Note: On newer Raspberry Pi images the command is `rpicam-vid` (not `libcamera-vid`).
+
 ```bash
-libcamera-vid -n -t 0 \
+rpicam-vid -n -t 0 \
   --width 1280 --height 720 --framerate 30 --bitrate 4000000 \
-  --inline --codec h264 -o - | \
+  --inline --codec h264 --libav-format h264 -o - | \
 gst-launch-1.0 -v fdsrc ! h264parse ! mpegtsmux alignment=7 ! \
   udpsink host=127.0.0.1 port=5602 buffer-size=1048576 sync=false async=false
 ```
 
+Note: `h264parse` / `mpegtsmux` may print timestamp and VUI warnings when the
+camera stream is piped over stdin. If `wfb_tx` shows non-zero `PKT`/`TX_ANT`
+counters and `tcpdump` sees UDP on port 5602, the stream is working.
+
 If needed, lower camera load first:
 
 ```bash
-libcamera-vid -n -t 0 \
+rpicam-vid -n -t 0 \
   --width 640 --height 360 --framerate 24 --bitrate 1200000 \
-  --inline --codec h264 -o - | \
+  --inline --codec h264 --libav-format h264 -o - | \
 gst-launch-1.0 -v fdsrc ! h264parse ! mpegtsmux alignment=7 ! \
   udpsink host=127.0.0.1 port=5602 buffer-size=1048576 sync=false async=false
 ```
@@ -248,7 +254,7 @@ grep -oE 'sendmsg\([^)]*\) = -1 [A-Z0-9_]+' /tmp/wfb_sendmsg.strace | \
 
 ### 7.8 Ground station (receive commands)
 
-Run these on the ground station side (receiver), using the same channel and key.
+Run these on the ground station side (receiver), using the same channel and the matching key pair: `drone.key` on TX and `gs.key` on RX.
 
 Ground station monitor setup:
 
@@ -263,9 +269,24 @@ ip link show nrf_wifi && iw dev nrf_wifi info
 
 Terminal 1: run `wfb_rx` and forward recovered stream to localhost UDP 5600:
 
+`wfb_rx` needs a capture interface that exposes radiotap (`DLT_IEEE802_11_RADIO`).
+On this driver, creating an extra monitor VIF with `iw dev ... interface add`
+can trigger a kernel crash, so do not use that path unless the driver is fixed.
+If the existing `nrf_wifi` monitor setup still fails with `unknown encapsulation`,
+stop there and reboot before retrying.
+
+Quick capability check:
+
+```bash
+sudo tcpdump -i nrf_wifi -L
+```
+
+If this shows only `EN10MB (Ethernet)`, `wfb_rx` cannot run on `nrf_wifi` yet,
+even when `iw dev nrf_wifi info` reports `type monitor`.
+
 ```bash
 cd /home/goran/Source/wfb-ng
-sudo ./wfb_rx -p 0 -u 5600 -K drone.key nrf_wifi -l 1000
+sudo ./wfb_rx -p 0 -u 5600 -K gs.key nrf_wifi -l 1000
 ```
 
 Terminal 2A: live video preview from recovered MPEG-TS stream:

@@ -9,6 +9,7 @@
 #include <linux/etherdevice.h>
 #include <net/ieee80211_radiotap.h>
 #include <linux/rtnetlink.h>
+#include <linux/if_arp.h>
 
 #include "host_rpu_umac_if.h"
 #include "main.h"
@@ -16,6 +17,39 @@
 #include "fmac_api.h"
 #include "fmac_util.h"
 #include "queue.h"
+
+int nrf_wifi_netdev_set_iftype(struct nrf_wifi_fmac_vif_ctx_lnx *vif_ctx_lnx,
+			       enum nl80211_iftype iftype)
+{
+	struct net_device *netdev = NULL;
+
+	if (!vif_ctx_lnx || !vif_ctx_lnx->netdev)
+		return -EINVAL;
+
+	netdev = vif_ctx_lnx->netdev;
+
+	if (iftype == NL80211_IFTYPE_MONITOR) {
+		netdev->type = ARPHRD_IEEE80211_RADIOTAP;
+		netdev->hard_header_len = 0;
+		netdev->addr_len = ETH_ALEN;
+		netdev->header_ops = NULL;
+		netdev->flags |= IFF_NOARP;
+	} else {
+		netdev->type = ARPHRD_ETHER;
+		netdev->hard_header_len = ETH_HLEN;
+		netdev->addr_len = ETH_ALEN;
+		netdev->header_ops = vif_ctx_lnx->saved_header_ops;
+		netdev->flags &= ~IFF_NOARP;
+	}
+
+	pr_info("%s: ifname=%s configured as %s link-layer (type=%u)\n",
+		__func__,
+		netdev->name,
+		iftype == NL80211_IFTYPE_MONITOR ? "monitor/radiotap" : "ethernet",
+		netdev->type);
+
+	return 0;
+}
 
 #ifdef CONFIG_NRF700X_DATA_TX
 
@@ -439,7 +473,19 @@ void nrf_wifi_netdev_frame_rx_callbk_fn(void *os_vif_ctx, void *frm)
 	netdev = vif_ctx_lnx->netdev;
 
 	skb->dev = netdev;
-	skb->protocol = eth_type_trans(skb, skb->dev);
+
+	if (vif_ctx_lnx->wdev &&
+	    vif_ctx_lnx->wdev->iftype == NL80211_IFTYPE_MONITOR) {
+		/*
+		 * Monitor interfaces should not run Ethernet header parsing. Keep
+		 * frame bytes intact for packet sockets (wfb_rx/tcpdump radiotap path).
+		 */
+		skb_reset_mac_header(skb);
+		skb->protocol = htons(ETH_P_802_2);
+		skb->pkt_type = PACKET_OTHERHOST;
+	} else {
+		skb->protocol = eth_type_trans(skb, skb->dev);
+	}
 	/*
 	 * RX frames arrive over SPI and are not accompanied by Linux-recognized
 	 * checksum offload metadata. Let the stack validate checksums in software
@@ -510,6 +556,7 @@ nrf_wifi_netdev_add_vif(struct nrf_wifi_ctx_lnx *rpu_ctx_lnx,
 	vif_ctx_lnx = netdev_priv(netdev);
 	vif_ctx_lnx->rpu_ctx = rpu_ctx_lnx;
 	vif_ctx_lnx->netdev = netdev;
+	vif_ctx_lnx->saved_header_ops = netdev->header_ops;
 	fmac_dev_ctx = rpu_ctx_lnx->rpu_ctx;
 
 	netdev->netdev_ops = &nrf_wifi_netdev_ops;
@@ -517,6 +564,9 @@ nrf_wifi_netdev_add_vif(struct nrf_wifi_ctx_lnx *rpu_ctx_lnx,
 	strncpy(netdev->name, if_name, sizeof(netdev->name) - 1);
 
 	eth_hw_addr_set(netdev, mac_addr);
+
+	/* Default VIF starts as STA/AP style Ethernet interface. */
+	nrf_wifi_netdev_set_iftype(vif_ctx_lnx, wdev->iftype);
 
 	netdev->ieee80211_ptr = wdev;
 

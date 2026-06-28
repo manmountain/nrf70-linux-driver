@@ -7,6 +7,7 @@
 #include <linux/etherdevice.h>
 #include <linux/firmware.h>
 #include <linux/rtnetlink.h>
+#include <net/ieee80211_radiotap.h>
 #include "main.h"
 #include "fmac_dbgfs_if.h"
 #include "pal.h"
@@ -727,6 +728,69 @@ static void nrf_wifi_process_rssi_from_rx(void *os_vif_ctx, signed short signal)
 #endif /* CONFIG_NRF700X_STA_MODE */
 
 #ifdef CONFIG_NRF700X_RAW_DATA_RX
+struct nrf_wifi_radiotap_rx_hdr {
+	unsigned char it_version;
+	unsigned char it_pad;
+	__le16 it_len;
+	__le32 it_present;
+	unsigned char flags;
+	unsigned char rate;
+	__le16 chan_freq;
+	__le16 chan_flags;
+	signed char signal;
+} __packed;
+
+static unsigned char nrf_wifi_raw_legacy_rate_to_rtap(unsigned char fw_rate)
+{
+	if (fw_rate == 55)
+		return 11;
+
+	if (fw_rate <= 54)
+		return fw_rate * 2;
+
+	return 0;
+}
+
+static void nrf_wifi_fill_radiotap_rx(struct nrf_wifi_radiotap_rx_hdr *rtap,
+				      struct raw_rx_pkt_header *raw_rx_hdr)
+{
+	unsigned short freq = 0;
+	unsigned short chan_flags = 0;
+	unsigned char rate = 0;
+
+	if (!rtap || !raw_rx_hdr)
+		return;
+
+	freq = raw_rx_hdr->frequency;
+
+	if (freq >= 2400 && freq <= 2500) {
+		chan_flags = IEEE80211_CHAN_2GHZ;
+		if (raw_rx_hdr->rate_flags == RPU_TPUT_MODE_LEGACY &&
+		    raw_rx_hdr->rate <= 22)
+			chan_flags |= IEEE80211_CHAN_CCK;
+		else
+			chan_flags |= IEEE80211_CHAN_OFDM;
+	} else {
+		chan_flags = IEEE80211_CHAN_5GHZ | IEEE80211_CHAN_OFDM;
+	}
+
+	if (raw_rx_hdr->rate_flags == RPU_TPUT_MODE_LEGACY)
+		rate = nrf_wifi_raw_legacy_rate_to_rtap(raw_rx_hdr->rate);
+
+	rtap->it_version = 0;
+	rtap->it_pad = 0;
+	rtap->it_len = cpu_to_le16(sizeof(*rtap));
+	rtap->it_present = cpu_to_le32(BIT(IEEE80211_RADIOTAP_FLAGS) |
+				       BIT(IEEE80211_RADIOTAP_RATE) |
+				       BIT(IEEE80211_RADIOTAP_CHANNEL) |
+				       BIT(IEEE80211_RADIOTAP_DBM_ANTSIGNAL));
+	rtap->flags = 0;
+	rtap->rate = rate;
+	rtap->chan_freq = cpu_to_le16(freq);
+	rtap->chan_flags = cpu_to_le16(chan_flags);
+	rtap->signal = (signed char)raw_rx_hdr->signal;
+}
+
 void nrf_wifi_rx_sniffer_frm_callbk_fn(void *os_vif_ctx,
 					void *frm,
 					struct raw_rx_pkt_header *raw_rx_hdr,
@@ -743,8 +807,24 @@ void nrf_wifi_rx_sniffer_frm_callbk_fn(void *os_vif_ctx,
 	if (!netdev)
 		goto out;
 
+	if (raw_rx_hdr) {
+		struct nrf_wifi_radiotap_rx_hdr rtap;
+
+		nrf_wifi_fill_radiotap_rx(&rtap, raw_rx_hdr);
+
+		if (skb_cow_head(skb, sizeof(rtap)))
+			goto out;
+
+		nrf_wifi_osal_mem_cpy(vif_ctx_lnx->rpu_ctx->rpu_ctx,
+				     skb_push(skb, sizeof(rtap)),
+				     &rtap,
+				     sizeof(rtap));
+	}
+
 	skb->dev = netdev;
 	skb->protocol = htons(ETH_P_802_2);
+	skb_reset_mac_header(skb);
+	skb->pkt_type = PACKET_OTHERHOST;
 	skb->ip_summed = CHECKSUM_NONE;
 
 	netif_rx(skb);

@@ -20,6 +20,7 @@
 struct nrf_wifi_fmac_vif_ctx_lnx {
 	struct nrf_wifi_ctx_lnx *rpu_ctx;
 	struct net_device *netdev;
+	const struct header_ops *saved_header_ops;
 	struct wireless_dev *wdev;
 	struct cfg80211_bss *bss;
 	struct cfg80211_scan_request *nrf_wifi_scan_req;

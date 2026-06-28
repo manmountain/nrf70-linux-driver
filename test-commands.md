@@ -6,6 +6,11 @@ sudo sysctl -w net.core.wmem_default=4194304
 sudo ip link set dev nrf_wifi txqueuelen 5000
 sudo ip link show nrf_wifi
 sudo iw dev nrf_wifi info
+
+# Verify capture encapsulation before using wfb_rx.
+# wfb_rx requires IEEE802_11_RADIO; if tcpdump shows only EN10MB,
+# RX on this interface is not supported yet.
+sudo tcpdump -i nrf_wifi -L
 sudo nmcli device set nrf_wifi managed no
 sudo ip link set nrf_wifi down
 sudo iw dev nrf_wifi set monitor otherbss
@@ -14,9 +19,39 @@ sudo ip link set nrf_wifi up
 sudo iw dev nrf_wifi set channel 149 HT20
 sudo ip link show nrf_wifi
 sudo iw dev nrf_wifi info
+sudo tcpdump -i nrf_wifi -L
+
+# TX examples below use `drone.key`; RX examples on the ground station use `gs.key`.
+
+# Fast monitor/RX debug filters (new cfg80211 instrumentation)
+sudo dmesg | grep -E "nrf_wifi_cfg80211_add_vif|nrf_wifi_cfg80211_chg_vif|monitor VIF creation"
 
 # Safe reload helper (brings interface down before rmmod)
 sudo ./scripts/safe-reload-driver.sh
+
+# Phase 2/3 monitor RX validation helper
+chmod +x ./scripts/validate-monitor-rx.sh
+sudo IFACE=nrf_wifi WFB_DIR=/home/goran/Source/wfb-ng ./scripts/validate-monitor-rx.sh
+
+# Single-card test note
+# With one nrf7002 on one Pi, you can validate TX pipeline and RX startup
+# (monitor + radiotap) but not a meaningful simultaneous TX->RX RF loopback.
+# For non-zero RX decode counters, use a second transmitter device.
+
+# Synthetic TX traffic recipe (run on transmitter device)
+# Terminal 1 (injector):
+cd /home/goran/Source/wfb-ng && sudo ./wfb_tx -p 0 -u 5602 -K drone.key nrf_wifi -l 1000 -Q
+
+# Terminal 2 (fake video payload -> localhost:5602):
+gst-launch-1.0 -q \
+	videotestsrc is-live=true pattern=smpte ! \
+	video/x-raw,width=640,height=360,framerate=30/1 ! \
+	x264enc tune=zerolatency bitrate=1200 speed-preset=ultrafast key-int-max=30 ! \
+	h264parse ! mpegtsmux alignment=7 ! \
+	udpsink host=127.0.0.1 port=5602 sync=false async=false
+
+# Ground station RX validation (run on receiver device)
+sudo IFACE=nrf_wifi WFB_DIR=/home/goran/Source/wfb-ng ./scripts/validate-monitor-rx.sh
 
 # Terminal 1
 cd /home/goran/Source/wfb-ng && sudo ./wfb_tx -p 0 -u 5602 -K drone.key nrf_wifi -Q

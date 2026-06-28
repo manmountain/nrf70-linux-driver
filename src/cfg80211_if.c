@@ -12,6 +12,7 @@
 #include "fmac_api_common.h"
 #include "fmac_util.h"
 #include "host_rpu_sys_if.h"
+#include <linux/if.h>
 #include <linux/version.h>
 
 extern const struct ieee80211_txrx_stypes ieee80211_default_mgmt_stypes[];
@@ -19,6 +20,24 @@ extern struct ieee80211_supported_band band_2ghz;
 extern struct ieee80211_supported_band band_5ghz;
 int get_scan_results;
 unsigned long long cmd_frame_cookie_g;
+
+static const char *nrf_wifi_iftype_name(enum nl80211_iftype iftype)
+{
+	switch (iftype) {
+	case NL80211_IFTYPE_STATION:
+		return "station";
+	case NL80211_IFTYPE_AP:
+		return "ap";
+	case NL80211_IFTYPE_MONITOR:
+		return "monitor";
+	case NL80211_IFTYPE_P2P_CLIENT:
+		return "p2p-client";
+	case NL80211_IFTYPE_P2P_GO:
+		return "p2p-go";
+	default:
+		return "other";
+	}
+}
 
 #ifndef CONFIG_NRF700X_RADIO_TEST
 struct wireless_dev *nrf_wifi_cfg80211_add_vif(struct wiphy *wiphy,
@@ -31,12 +50,47 @@ struct wireless_dev *nrf_wifi_cfg80211_add_vif(struct wiphy *wiphy,
 	struct nrf_wifi_fmac_vif_ctx_lnx *vif_ctx_lnx = NULL;
 	struct nrf_wifi_umac_add_vif_info *add_vif_info = NULL;
 	unsigned char mac_addr[ETH_ALEN];
+	int ret = -EOPNOTSUPP;
+	size_t name_len = 0;
+
+	if (!wiphy || !name || !name[0]) {
+		pr_err("%s: Invalid add_vif arguments\n", __func__);
+		return ERR_PTR(-EINVAL);
+	}
+
+	pr_info("%s: request name=%s type=%s(%d)\n",
+		__func__,
+		name,
+		nrf_wifi_iftype_name(type),
+		type);
+
+	/*
+	 * Keep monitor support on the default interface via change_virtual_intf
+	 * but reject creating additional monitor VIFs until add_vif is fixed for
+	 * this driver path.
+	 */
+	if (type == NL80211_IFTYPE_MONITOR) {
+		pr_err("%s: monitor VIF creation is currently unsupported\n",
+		       __func__);
+		return ERR_PTR(-EOPNOTSUPP);
+	}
+
+	name_len = strnlen(name, IFNAMSIZ);
+	if (name_len >= IFNAMSIZ) {
+		pr_err("%s: Interface name too long\n", __func__);
+		return ERR_PTR(-EINVAL);
+	}
 
 	rpu_ctx_lnx = wiphy_priv(wiphy);
+	if (!rpu_ctx_lnx || !rpu_ctx_lnx->rpu_ctx) {
+		pr_err("%s: Invalid driver context\n", __func__);
+		return ERR_PTR(-ENODEV);
+	}
 
 	if (nrf_wifi_fmac_mac_addr(rpu_ctx_lnx->rpu_ctx, mac_addr) !=
 	    NRF_WIFI_STATUS_SUCCESS) {
 		pr_err("%s: Unable to get mac address for VIF\n", __func__);
+		ret = -EIO;
 		goto err;
 	}
 
@@ -45,6 +99,7 @@ struct wireless_dev *nrf_wifi_cfg80211_add_vif(struct wiphy *wiphy,
 
 	if (!vif_ctx_lnx) {
 		pr_err("%s: Unable to add interface to the stack\n", __func__);
+		ret = -ENOMEM;
 		goto err;
 	}
 
@@ -52,12 +107,19 @@ struct wireless_dev *nrf_wifi_cfg80211_add_vif(struct wiphy *wiphy,
 
 	if (!add_vif_info) {
 		pr_err("%s: Unable to allocate memory\n", __func__);
+		ret = -ENOMEM;
 		goto err;
 	}
 
 	add_vif_info->iftype = type;
 
-	memcpy(add_vif_info->ifacename, name, strlen(name));
+	if (strscpy(add_vif_info->ifacename,
+		    name,
+		    sizeof(add_vif_info->ifacename)) < 0) {
+		pr_err("%s: Failed to copy interface name\n", __func__);
+		ret = -EINVAL;
+		goto err;
+	}
 
 	ether_addr_copy(add_vif_info->mac_addr, mac_addr);
 
@@ -66,12 +128,26 @@ struct wireless_dev *nrf_wifi_cfg80211_add_vif(struct wiphy *wiphy,
 
 	if (vif_ctx_lnx->if_idx >= MAX_NUM_VIFS) {
 		pr_err("%s: nrf_wifi_fmac_add_vif failed\n", __func__);
+		ret = -EIO;
 		goto err;
 	}
+
+	pr_info("%s: created name=%s if_idx=%d type=%s(%d)\n",
+		__func__,
+		name,
+		vif_ctx_lnx->if_idx,
+		nrf_wifi_iftype_name(type),
+		type);
 
 	goto out;
 
 err:
+	pr_err("%s: add_vif failed name=%s type=%s(%d) ret=%d\n",
+	       __func__,
+	       name,
+	       nrf_wifi_iftype_name(type),
+	       type,
+	       ret);
 	if (vif_ctx_lnx) {
 		nrf_wifi_wlan_fmac_del_vif(vif_ctx_lnx);
 		vif_ctx_lnx = NULL;
@@ -83,7 +159,7 @@ out:
 	if (vif_ctx_lnx)
 		return vif_ctx_lnx->wdev;
 	else
-		return ERR_PTR(-EOPNOTSUPP);
+		return ERR_PTR(ret);
 }
 
 int nrf_wifi_cfg80211_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
@@ -140,24 +216,23 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 	vif_ctx_lnx = netdev_priv(netdev);
 	rpu_ctx_lnx = vif_ctx_lnx->rpu_ctx;
 
-	/* Monitor mode uses a separate raw-mode firmware command path.
-	 * The firmware only reliably accepts plain MONITOR_MODE (0x2); the
-	 * combined MONITOR|TX_INJECTION mode byte is not echoed back in the
-	 * response event, so the nrfxlib event handler never promotes if_type
-	 * to MONITOR_TX_INJECTOR.  Work around this by:
-	 *   1. Sending only MONITOR_MODE to the firmware (which it accepts).
-	 *   2. Directly forcing the nrfxlib VIF internal state to
-	 *      MONITOR_TX_INJECTOR so raw TX commands are accepted.
+	pr_info("%s: request ifname=%s if_idx=%d -> type=%s(%d)\n",
+		__func__,
+		netdev ? netdev->name : "<null>",
+		vif_ctx_lnx ? vif_ctx_lnx->if_idx : -1,
+		nrf_wifi_iftype_name(iftype),
+		iftype);
+
+	/*
+	 * Keep monitor mode transition host-side.
+	 *
+	 * Firmware set_mode(MONITOR) has been observed to trigger asynchronous
+	 * "Set mode failed" / interrupt callback failures even when cfg80211
+	 * monitor mode works at the host stack level. For reliable RX capture,
+	 * switch iftype/link-layer locally and keep TX-injection state explicit.
 	 */
 	if (iftype == NL80211_IFTYPE_MONITOR) {
-		status = nrf_wifi_fmac_set_mode(rpu_ctx_lnx->rpu_ctx,
-						vif_ctx_lnx->if_idx,
-						NRF_WIFI_MONITOR_MODE);
-		if (status != NRF_WIFI_STATUS_SUCCESS) {
-			pr_err("%s: nrf_wifi_fmac_set_mode(MONITOR) failed\n",
-			       __func__);
-			return -EIO;
-		}
+		status = 0;
 
 #ifdef CONFIG_NRF700X_RAW_DATA_TX
 		{
@@ -175,17 +250,23 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 					MAX_PEERS;
 				def_dev_ctx->tx_config.peers[MAX_PEERS].if_idx =
 					vif_ctx_lnx->if_idx;
-				pr_debug("%s: forced MONITOR_TX_INJECTOR on if_idx=%d\n",
+				pr_debug("%s: monitor TX injector state forced on if_idx=%d\n",
 					 __func__, vif_ctx_lnx->if_idx);
 			}
 		}
 #endif
 		wdev->iftype = NL80211_IFTYPE_MONITOR;
+		nrf_wifi_netdev_set_iftype(vif_ctx_lnx, NL80211_IFTYPE_MONITOR);
 
 		/* Monitor interfaces have no association event to drive carrier
 		 * state.  Force carrier on so raw socket sendto() does not get
 		 * ENETDOWN and wfb_tx does not report dropped packets. */
 		netif_carrier_on(netdev);
+
+		pr_info("%s: monitor mode active ifname=%s if_idx=%d\n",
+			__func__,
+			netdev->name,
+			vif_ctx_lnx->if_idx);
 
 		return 0;
 	}
@@ -204,7 +285,12 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 				       vif_ctx_lnx->if_idx, vif_info);
 
 	if (status == NRF_WIFI_STATUS_FAIL) {
-		pr_err("%s: nrf_wifi_fmac_set_vif failed\n", __func__);
+		pr_err("%s: nrf_wifi_fmac_set_vif failed ifname=%s if_idx=%d target=%s(%d)\n",
+		       __func__,
+		       netdev->name,
+		       vif_ctx_lnx->if_idx,
+		       nrf_wifi_iftype_name(iftype),
+		       iftype);
 		goto out;
 	}
 
@@ -215,13 +301,24 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 
 	if (!vif_ctx_lnx->event_set_if) {
 		status = -ETIMEDOUT;
-		pr_err("%s:Timed out waiting for response from RPU (change VIF)\n",
-		       __func__);
+		pr_err("%s: timed out waiting for response (ifname=%s if_idx=%d target=%s(%d))\n",
+		       __func__,
+		       netdev->name,
+		       vif_ctx_lnx->if_idx,
+		       nrf_wifi_iftype_name(iftype),
+		       iftype);
 		goto out;
 	}
 
 	if (vif_ctx_lnx->status_set_if) {
 		status = vif_ctx_lnx->status_set_if;
+		pr_err("%s: firmware rejected change (ifname=%s if_idx=%d status_set_if=%d target=%s(%d))\n",
+		       __func__,
+		       netdev->name,
+		       vif_ctx_lnx->if_idx,
+		       status,
+		       nrf_wifi_iftype_name(iftype),
+		       iftype);
 		goto out;
 	}
 
@@ -229,6 +326,14 @@ int nrf_wifi_cfg80211_chg_vif(struct wiphy *wiphy, struct net_device *netdev,
 					 vif_ctx_lnx->if_idx, iftype);
 
 	wdev->iftype = iftype;
+	nrf_wifi_netdev_set_iftype(vif_ctx_lnx, iftype);
+
+	pr_info("%s: changed ifname=%s if_idx=%d new_type=%s(%d)\n",
+		__func__,
+		netdev->name,
+		vif_ctx_lnx->if_idx,
+		nrf_wifi_iftype_name(iftype),
+		iftype);
 
 out:
 	vif_ctx_lnx->event_set_if = 0;
